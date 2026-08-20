@@ -1,0 +1,333 @@
+esphome:
+  name: ctrl-one
+  name_add_mac_suffix: true
+  friendly_name: CTRL ONE
+  min_version: 2026.7.0
+  project:
+    name: elvinhome.ctrl-one
+    version: "1.0.0"
+  on_boot:
+    then:
+      - if:
+          condition:
+            lambda: "return id(status_text_entity).state.empty();"
+          then:
+            - text.set:
+                id: status_text_entity
+                value: !lambda "return App.get_name().str();"
+      - script.execute:
+          id: boot_pulse
+
+esp32:
+  variant: esp32c6
+
+logger:
+  level: DEBUG
+
+wifi:
+
+api:
+  on_client_connected:
+    - if:
+        condition:
+          script.is_running: boot_pulse
+        then:
+          - script.stop: boot_pulse
+          - light.turn_on:
+              id: indicator_light
+              red: 0%
+              green: 100%
+              blue: 0%
+              brightness: 80%
+              transition_length: 2s
+          - delay: 3s
+          - light.turn_off:
+              id: indicator_light
+              transition_length: 1s
+
+  actions:
+    - action: calibrate_co2_value
+      variables:
+        co2_ppm: float
+      then:
+        - scd4x.perform_forced_calibration:
+            value: !lambda "return co2_ppm;"
+            id: scd40
+
+ota:
+  - platform: esphome
+
+esp32_improv:
+  authorizer: none
+
+improv_serial:
+
+dashboard_import:
+  package_import_url: codeberg://elvinhome/ctrl-one/esphome/ctrl-one.yaml
+
+packages:
+  main:
+    refresh: 4h
+    url: https://codeberg.org/elvinhome/ctrl-one
+    files:
+      - esphome/core/lvgl.yaml
+      # - path: esphome/core/lvgl-extra-page.yaml
+      #   vars:
+      #     page_number: 1
+      - path: esphome/widgets/widget-temperature.yaml
+        vars:
+          grid_x: 0
+          grid_y: 1
+      # - path: esphome/widgets/widget-setpoint.yaml
+      #   vars:
+      #     grid_x: 0
+      #     grid_y: 3
+      - path: esphome/widgets/widget-humidity.yaml
+        vars:
+          grid_x: 0
+          grid_y: 4
+      - path: esphome/widgets/widget-co2.yaml
+        vars:
+          grid_x: 2
+          grid_y: 4
+
+globals:
+  - id: status_text_ready
+    type: bool
+    initial_value: "false"
+  - id: auto_backlight_brightness
+    type: float
+    initial_value: "0.5"
+
+text:
+  - platform: template
+    id: status_text_entity
+    name: "Status Text"
+    mode: TEXT
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - if:
+            condition:
+              lambda: "return id(status_text_ready);"
+            then:
+              - lvgl.label.update:
+                  id: status_text
+                  text: !lambda "return x;"
+
+spi:
+  clk_pin: GPIO19
+  mosi_pin: GPIO18
+
+i2c:
+  sda: GPIO3
+  scl: GPIO2
+  scan: false
+  frequency: 100kHz
+
+binary_sensor:
+  - platform: status
+    id: system_status
+
+button:
+  - platform: restart
+    name: Restart
+  - platform: safe_mode
+    name: Restart (Safe Mode)
+  - platform: template
+    name: "Calibrate SCD40 To 426ppm"
+    entity_category: CONFIG
+    on_press:
+      - scd4x.perform_forced_calibration:
+          value: 426
+          id: scd40
+
+sensor:
+  - platform: uptime
+    name: Uptime
+    id: uptime_sensor
+  - platform: wifi_signal
+    name: Signal Strength
+    id: wifi_sensor
+  - platform: adc
+    pin: GPIO6
+    name: Ambient Light
+    id: ambient_light
+    update_interval: 3s
+    attenuation: auto
+    unit_of_measurement: lx
+    device_class: illuminance
+    filters:
+      - lambda: |-
+          if (id(backlight).current_values.is_on()) {
+            return {};  // suppress reading when backlight is on
+          }
+          // ALS-PT19 behind 1.5mm aperture, 3.3V, 10KΩ to GND
+          // Rough calibration for indoor use
+          return x * 4000.0f;
+      - sliding_window_moving_average:
+          window_size: 20
+          send_every: 5
+      - delta: 1.0
+    accuracy_decimals: 0
+    on_value:
+      then:
+        - globals.set:
+            id: auto_backlight_brightness
+            value: !lambda |-
+              float lux = x;
+              // Bright daylight: off
+              if (lux > 1000.0f) return 0.0f;
+              // Pitch dark: 20%
+              if (lux < 5.0f) return 0.2f;
+              // Peak at ~200 lux (dim room), taper both ways
+              float b;
+              if (lux < 200.0f) {
+                b = 0.2f + 0.6f * (lux / 200.0f);
+              } else {
+                b = 0.8f * (1.0f - (lux - 200.0f) / 800.0f);
+              }
+              if (b > 0.8f) b = 0.8f;
+              if (b < 0.0f) b = 0.0f;
+              return b;
+  - platform: scd4x
+    id: scd40
+    co2:
+      name: "CO2"
+      id: scd_co2_raw
+      filters:
+        - skip_initial: 3
+        - delta: 5.0
+    temperature:
+      name: "Temperature"
+      id: scd_temperature_raw
+      filters:
+        - skip_initial: 4
+        - delta: 0.1
+        - lambda: |-
+            if (id(indicator_light).current_values.is_on()) {
+              return {};  // suppress reading when indicator is on
+            }
+            return x;
+      on_value:
+        then:
+          - globals.set:
+              id: status_text_ready
+              value: "true"
+          - lvgl.label.update:
+              id: status_text
+              text: !lambda "return id(status_text_entity).state;"
+    humidity:
+      name: "Humidity"
+      id: scd_humidity_raw
+      filters:
+        - delta: 1
+    automatic_self_calibration: false
+    measurement_mode: low_power_periodic
+    update_interval: 30s
+
+output:
+  - platform: ledc
+    id: screen_led
+    frequency: 1220Hz
+    min_power: 0.05
+    zero_means_zero: true
+    pin:
+      number: GPIO7
+  - platform: ledc
+    id: rgb_r
+    frequency: 1220Hz
+    pin:
+      number: GPIO8
+      inverted: true
+  - platform: ledc
+    id: rgb_b
+    frequency: 1220Hz
+    pin:
+      number: GPIO14
+      inverted: true
+  - platform: ledc
+    id: rgb_g
+    frequency: 1220Hz
+    pin:
+      number: GPIO15
+      inverted: true
+
+light:
+  - platform: monochromatic
+    output: screen_led
+    id: backlight
+    name: "Screen Light"
+    restore_mode: ALWAYS_OFF
+  - platform: rgb
+    id: indicator_light
+    name: Indicator Light
+    red: rgb_r
+    green: rgb_g
+    blue: rgb_b
+
+script:
+  - id: touch_backlight
+    mode: restart
+    then:
+      - light.turn_on:
+          id: backlight
+          brightness: !lambda "return id(auto_backlight_brightness);"
+      - delay: 5s
+      - light.turn_off: backlight
+  - id: boot_pulse
+    then:
+      # Pulse blue until an API client (Home Assistant) connects, max 30s
+      - repeat:
+          count: 10
+          then:
+            - light.turn_on:
+                id: indicator_light
+                red: 0%
+                green: 0%
+                blue: 100%
+                brightness: 80%
+                transition_length: 1s
+            - delay: 1s
+            - light.turn_off:
+                id: indicator_light
+                transition_length: 1s
+            - delay: 1s
+      # Timed out: red pulse
+      - light.turn_on:
+          id: indicator_light
+          red: 100%
+          green: 0%
+          blue: 0%
+          brightness: 80%
+          transition_length: 2s
+      - delay: 3s
+      - light.turn_off:
+          id: indicator_light
+          transition_length: 1s
+
+display:
+  - platform: epaper_spi
+    id: goodisplay
+    model: goodisplay-gdey042t81-4.2
+    cs_pin: GPIO20
+    dc_pin: GPIO21
+    busy_pin: GPIO23
+    reset_pin: GPIO22
+    update_interval: never
+    full_update_every: 5
+    auto_clear_enabled: false
+
+touchscreen:
+  - platform: ft63x6
+    id: touch_digitizer
+    interrupt_pin: GPIO4
+    reset_pin: GPIO5
+    on_touch:
+      - script.execute:
+          id: touch_backlight
+
+factory_reset:
+  resets_required: 5
+  max_delay: 10s
