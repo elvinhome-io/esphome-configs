@@ -5,7 +5,7 @@ esphome:
   min_version: 2026.7.0
   project:
     name: elvinhome.ctrl-one
-    version: "1.0.0"
+    version: "1.0.2"
   on_boot:
     then:
       - if:
@@ -62,6 +62,7 @@ ota:
 
 update:
   - platform: http_request
+    id: firmware_update
     name: Firmware
     source: https://codeberg.org/elvinhome/ctrl-one/releases/download/latest/manifest.json
 
@@ -142,10 +143,13 @@ binary_sensor:
 
 button:
   - platform: restart
+    id: button_restart
     name: Restart
   - platform: safe_mode
+    id: button_safe_mode
     name: Restart (Safe Mode)
   - platform: template
+    id: button_calibrate_scd40
     name: "Calibrate SCD40 To 426ppm"
     entity_category: CONFIG
     on_press:
