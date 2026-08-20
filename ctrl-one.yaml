@@ -54,8 +54,16 @@ api:
             value: !lambda "return co2_ppm;"
             id: scd40
 
+http_request:
+
 ota:
   - platform: esphome
+  - platform: http_request
+
+update:
+  - platform: http_request
+    name: Firmware
+    source: https://codeberg.org/elvinhome/ctrl-one/releases/download/latest/manifest.json
 
 esp32_improv:
   authorizer: none
@@ -117,10 +125,12 @@ text:
                   text: !lambda "return x;"
 
 spi:
+  id: spi_display
   clk_pin: GPIO19
   mosi_pin: GPIO18
 
 i2c:
+  id: i2c_main
   sda: GPIO3
   scl: GPIO2
   scan: false
